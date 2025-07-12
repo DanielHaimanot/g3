@@ -46,6 +46,15 @@ pub fn new_std_listener(config: &TcpListenConfig) -> io::Result<std::net::TcpLis
     if let Some(iface) = config.interface() {
         socket.bind_device(Some(iface.c_bytes()))?;
     }
+
+    #[cfg(not(target_os = "openbsd"))]
+    if let Some(tcpkeepalive_config) = config.tcp_keepalive() {
+        if let Some(setting) = enable_tcp_keepalive(tcpkeepalive_config) {
+            println!("setting listener keepalive info::{:?}", tcpkeepalive_config);
+            socket.set_tcp_keepalive(&setting)?;
+        }
+    }
+
     #[cfg(any(target_os = "macos", target_os = "illumos", target_os = "solaris"))]
     if let Some(iface) = config.interface() {
         match family {
@@ -67,18 +76,12 @@ pub fn new_std_socket_to(
     let peer_family = AddressFamily::from(&peer_ip);
     let socket = new_tcp_socket(peer_family)?;
     bind.bind_tcp_for_connect(&socket, peer_family)?;
+
     #[cfg(not(target_os = "openbsd"))]
-    if keepalive.is_enabled() {
-        // set keepalive_idle
-        let mut setting = TcpKeepalive::new().with_time(keepalive.idle_time());
-        if let Some(interval) = keepalive.probe_interval() {
-            setting = setting.with_interval(interval);
-        }
-        if let Some(count) = keepalive.probe_count() {
-            setting = setting.with_retries(count);
-        }
+    if let Some(setting) = enable_tcp_keepalive(keepalive) {
         socket.set_tcp_keepalive(&setting)?;
     }
+
     #[cfg(target_os = "openbsd")]
     if keepalive.is_enabled() {
         // set keepalive_idle
@@ -87,6 +90,21 @@ pub fn new_std_socket_to(
     }
     RawSocket::from(&socket).set_tcp_misc_opts(peer_family, misc_opts, default_set_nodelay)?;
     Ok(std::net::TcpStream::from(socket))
+}
+
+fn enable_tcp_keepalive(config: &TcpKeepAliveConfig) -> Option<TcpKeepalive> {
+    if config.is_enabled() {
+        let mut setting = TcpKeepalive::new().with_time(config.idle_time());
+        if let Some(interval) = config.probe_interval() {
+            setting = setting.with_interval(interval);
+        }
+        if let Some(count) = config.probe_count() {
+            setting = setting.with_retries(count);
+        }
+        Some(setting)
+    } else {
+        None
+    }
 }
 
 #[cfg(any(windows, target_os = "macos"))]

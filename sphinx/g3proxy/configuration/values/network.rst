@@ -290,6 +290,16 @@ It consists of the following fields:
 
   .. versionadded:: 1.11.6
 
+* tcp_keepalive
+
+  **optional**: **type**: :ref:`tcp_keepalive name <_conf_value_tcp_keepalive_name>`
+
+ Set the keep-alive config for the listing tcp socket.
+
+  **default**: not set
+
+  .. versionadded:: 1.11.9
+
 * backlog
 
   **optional**, **type**: unsigned int
