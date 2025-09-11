@@ -85,6 +85,7 @@ pub(crate) trait StreamTransitTask {
                 r = &mut clt_to_ups => {
                     return match r {
                         Ok(_) => {
+                            println!("write to remote...");
                             let _ = clt_to_ups.writer().shutdown().await;
                             self.log_client_shutdown();
                             self.transit_south(ups_to_clt, log_interval, idle_interval, idle_count, max_idle_count).await
@@ -99,6 +100,7 @@ pub(crate) trait StreamTransitTask {
                 r = &mut ups_to_clt => {
                     return match r {
                         Ok(_) => {
+                            println!("write to client...");
                             let _ = ups_to_clt.writer().shutdown().await;
                             self.log_upstream_shutdown();
                             self.transit_north(clt_to_ups, log_interval, idle_interval, idle_count, max_idle_count).await
@@ -123,6 +125,7 @@ pub(crate) trait StreamTransitTask {
                             }
 
                         if idle_count >= max_idle_count {
+                            println!("@@@ HIT task idle Count!");
                             return Err(ServerTaskError::Idle(idle_interval.period(), idle_count));
                         }
                     } else {
@@ -467,7 +470,7 @@ where
         mut inspector: ProtocolInspector,
     ) -> ServerTaskResult<()> {
         let mut obj = self;
-
+        println!("### run into_loop_inspection for stream");
         loop {
             match obj {
                 StreamInspection::StreamUnknown(stream) => {
@@ -482,6 +485,7 @@ where
                     inspector.unset_no_explicit_ssl();
                 }
                 StreamInspection::TlsModern(tls) => {
+                    println!("--> into_inspect TLSModern??");
                     obj = tls.intercept(&mut inspector).await?;
                     inspector.reset_state();
                     inspector.set_no_explicit_ssl();
@@ -493,6 +497,7 @@ where
                     inspector.set_no_explicit_ssl();
                 }
                 StreamInspection::StartTls(start_tls) => {
+                    println!("--> into_inspect: StartTls Inspection?");
                     obj = start_tls.intercept().await?;
                     // no need to reset inspector state as the protocol should be known
                 }
@@ -505,6 +510,7 @@ where
                     None => break,
                 },
                 StreamInspection::H2(h2) => {
+                    println!("--> into_inspect H2??");
                     return h2.intercept().await;
                 }
                 StreamInspection::Websocket(websocket) => {

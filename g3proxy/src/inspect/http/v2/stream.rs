@@ -32,17 +32,20 @@ pub(super) async fn transfer<SC>(
     }
     let clt_stream_id = clt_send_rsp.stream_id();
     if clt_req.method().eq(&Method::CONNECT) {
+        println!("===> using H2Extended connect task........");
         if let Some(protocol) = clt_req.extensions().get::<Protocol>() {
             let upgrade_protocol = HttpUpgradeToken::from_str(protocol.as_str())
                 .unwrap_or_else(|_e| HttpUpgradeToken::Unsupported(protocol.as_str().to_string()));
 
             let connect_task = H2ExtendedConnectTask::new(ctx, clt_stream_id, upgrade_protocol);
-            connect_task.into_running(clt_req, clt_send_rsp, h2s).await;
+            connect_task.into_running(clt_req, clt_send_rsp, h2s).await
         } else {
+            println!("===> using H2ConnectTask...");
             let connect_task = H2ConnectTask::new(ctx, clt_stream_id);
             connect_task.into_running(clt_req, clt_send_rsp, h2s).await
         };
     } else {
+        println!("---> using H2ForwardTask..");
         let forward_task = H2ForwardTask::new(ctx, clt_stream_id, &clt_req);
         forward_task.forward(clt_req, clt_send_rsp, h2s).await
     }

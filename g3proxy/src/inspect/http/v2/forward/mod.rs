@@ -180,8 +180,10 @@ where
     ) {
         if let Err(e) = self.do_forward(clt_req, &mut clt_send_rsp, h2s).await {
             if self.send_error_response {
+                println!("++++++    ---> write forward error! {e}");
                 self.reply_task_err(clt_send_rsp, &e);
             }
+            println!("++++++++  || ----> !!! Forwarding ERROR --> {:?} --> {:?} StreamId({:?})", e, self.ctx.task_notes.client_addr, self.clt_stream_id.as_u32());
             intercept_log!(self, "{e}");
         } else {
             intercept_log!(self, "finished");
@@ -202,9 +204,12 @@ where
             return self.reply_expectation_failed(clt_send_rsp);
         }
 
+        let addr = self.ctx.task_notes.client_addr;
+        let x_id = self.clt_stream_id.as_u32();
+
         let ups_send_req = match tokio::time::timeout(
             self.ctx.h2_interception().upstream_stream_open_timeout,
-            h2s.ready(),
+            h2s.ready(), // @@@ wait for remote h2 handshake
         )
         .await
         {
@@ -213,11 +218,13 @@ where
                 d
             }
             Ok(Err(e)) => {
+                println!("++++++   ||     ---> forwarding REFUSED_STREAM ---> {addr} StreamId({x_id}) error:{e}");
                 let reason = e.reason().unwrap_or(Reason::REFUSED_STREAM);
                 clt_send_rsp.send_reset(reason);
                 return Err(H2StreamTransferError::UpstreamStreamOpenFailed(e));
             }
-            Err(_) => {
+            Err(e) => {
+                println!("++++++    ||    ---> forwarding REFUSED_STREAM ---> {addr} StreamId({x_id}) error:{e}");
                 clt_send_rsp.send_reset(Reason::REFUSED_STREAM);
                 return Err(H2StreamTransferError::UpstreamStreamOpenTimeout);
             }
@@ -225,6 +232,7 @@ where
 
         self.send_error_response = true;
         let ups_req = Request::from_parts(parts, ());
+        let x_id = clt_send_rsp.stream_id().as_u32();
 
         if let Some(reqmod) = self.ctx.audit_handle.icap_reqmod_client() {
             match reqmod
@@ -273,7 +281,7 @@ where
                 }
             }
         }
-
+        println!("          >>> {:?} StreamId({x_id}) forwarding without adaptation response.. {:?}", self.ctx.task_notes.client_addr, self.ctx.server_task_id());
         self.forward_without_adaptation(ups_send_req, ups_req, clt_body, clt_send_rsp)
             .await
     }
@@ -383,9 +391,11 @@ where
         clt_send_rsp: &mut SendResponse<Bytes>,
     ) -> Result<(), H2StreamTransferError> {
         if clt_body.is_end_stream() {
+            println!("          ****** forward without body");
             self.forward_without_body(ups_send_req, ups_req, clt_send_rsp)
                 .await
         } else {
+            println!("          ****** forward with body");
             self.forward_with_body(ups_send_req, ups_req, clt_body, clt_send_rsp)
                 .await
         }
@@ -401,11 +411,17 @@ where
 
         let (ups_rsp_fut, _) = ups_send_req
             .send_request(ups_req, true)
-            .map_err(H2StreamTransferError::RequestHeadSendFailed)?; // do not send REFUSED_STREAM, use the default rst in h2
+            .map_err(|e| {
+                println!("++++          --> failed request head with {:?} -- StreamId({:?}) client:{:?}",e, self.ups_stream_id, self.ctx.task_notes.client_addr);
+                H2StreamTransferError::RequestHeadSendFailed(e) // do not send REFUSED_STREAM, use the default rst in h2
+            })?;
+
+
         self.ups_stream_id = Some(ups_rsp_fut.stream_id());
         self.http_notes.mark_req_send_hdr();
         self.http_notes.mark_req_no_body();
 
+        // println!("      *** timeout value {:?}", self.ctx.h2_rsp_hdr_recv_timeout());
         // there shouldn't be 100 response in this case
         let ups_rsp =
             match tokio::time::timeout(self.ctx.h2_rsp_hdr_recv_timeout(), ups_rsp_fut).await {
@@ -413,11 +429,17 @@ where
                     self.http_notes.mark_rsp_recv_hdr();
                     d
                 }
-                Ok(Err(e)) => return Err(H2StreamTransferError::ResponseHeadRecvFailed(e)),
-                Err(_) => return Err(H2StreamTransferError::ResponseHeadRecvTimeout),
+                Ok(Err(e)) => {
+                    println!("++++      --> we hit error from the -- upstream server: {:?} -- StreamId({:?})", e, self.ups_stream_id);
+                    return Err(H2StreamTransferError::ResponseHeadRecvFailed(e))
+                },
+                Err(e) => {
+                    println!("++++          --> failed with {:?} -- StreamId({:?})",e, self.ups_stream_id);
+                    return Err(H2StreamTransferError::ResponseHeadRecvTimeout)
+                },
             };
 
-        self.send_response(orig_req, ups_rsp, clt_send_rsp, None)
+        self.send_response(orig_req, ups_rsp, clt_send_rsp, None) // @@@ TOMORROW check the UPS_RSP type
             .await
     }
 
@@ -433,6 +455,7 @@ where
         let (mut ups_rsp_fut, ups_send_stream) = ups_send_req
             .send_request(ups_req, false)
             .map_err(H2StreamTransferError::RequestHeadSendFailed)?; // do not send REFUSED_STREAM, use the default rst in h2
+
         self.ups_stream_id = Some(ups_rsp_fut.stream_id());
         self.http_notes.mark_req_send_hdr();
 
@@ -477,13 +500,13 @@ where
                 n = idle_interval.tick() => {
                     if req_body_transfer.is_idle() {
                         idle_count += n;
-
+                        println!(" **** transfer request to remote is IDLE");
                         if idle_count > self.ctx.max_idle_count {
                             return Err(H2StreamTransferError::Idle(idle_interval.period(), idle_count));
                         }
                     } else {
                         idle_count = 0;
-
+                        println!(" **** transfer request to remote is NOT_IDLE");
                         req_body_transfer.reset_active();
                     }
 
@@ -575,6 +598,7 @@ where
             }
         }
 
+        println!("### sending response from remote to client");
         self.send_response_without_adaptation(clt_rsp, ups_body, clt_send_rsp)
             .await
     }
@@ -605,6 +629,7 @@ where
         }
     }
 
+    // @@@ send the h2 response information here
     async fn send_response_without_adaptation(
         &mut self,
         clt_rsp: Response<()>,
@@ -613,16 +638,29 @@ where
     ) -> Result<(), H2StreamTransferError> {
         self.send_error_response = false;
 
+        let addr = self.ctx.task_notes.client_addr.clone();
+        let x_id = clt_send_rsp.stream_id().as_u32();
+
         if ups_body.is_end_stream() {
+            println!("  >>> ---> {addr}***StreamId({x_id}) this is the end of stream..");
             self.http_notes.mark_rsp_no_body();
-            let _ = clt_send_rsp
+            clt_send_rsp
                 .send_response(clt_rsp, true)
-                .map_err(H2StreamTransferError::ResponseHeadSendFailed)?;
+                .map_err(|e| {
+                    println!("++++++          >>>> ---> {addr} StreamId({x_id}) client send response !!!!!! {e} -- ");
+                    H2StreamTransferError::ResponseHeadSendFailed(e)
+                })?;
+
             self.http_notes.rsp_status = self.http_notes.origin_status;
         } else {
+            println!("  >>> ---> {addr} ***StreamId({x_id})  this is not the end of stream... send partial and continue to wait...");
             let clt_send_stream = clt_send_rsp
                 .send_response(clt_rsp, false)
-                .map_err(H2StreamTransferError::ResponseHeadSendFailed)?;
+                .map_err( |e| {
+                    println!("+++++++          >>>> ---> {addr} StreamId({x_id}) client send stream !!!!!! -- ");
+                    H2StreamTransferError::ResponseHeadSendFailed(e)
+                })?;
+
             self.http_notes.rsp_status = self.http_notes.origin_status;
 
             let mut rsp_body_transfer = H2BodyTransfer::new(
@@ -634,6 +672,8 @@ where
             let mut idle_interval = self.ctx.idle_wheel.register();
             let mut idle_count = 0;
 
+            println!("  >>> ----> {addr} http2 wait for response body uses idle_interval={:?}", idle_interval.period());
+
             loop {
                 tokio::select! {
                     biased;
@@ -642,21 +682,26 @@ where
                         match r {
                             Ok(_) => {
                                 self.http_notes.mark_rsp_recv_all();
+                                println!("      >>> ----> {addr} ***StreamId({x_id}) we finally got done!.");
                                 break;
                             },
-                            Err(e) => return Err(H2StreamTransferError::ResponseBodyTransferFailed(e)),
+                            Err(e) => {
+                                println!("++++++      >>> ----> {addr} ***StreamId({x_id}) resp_body_transfer ERROR: --> {e}");
+                                return Err(H2StreamTransferError::ResponseBodyTransferFailed(e));
+                            },
                         }
                     }
                     n = idle_interval.tick() => {
                         if rsp_body_transfer.is_idle() {
                             idle_count += n;
-
+                            println!("      >>>IDLE ^^^^^ {addr} ***StreamId({x_id}) --> idle_count: {idle_count} task_id: {:?}", self.ctx.server_task_id());
                             if idle_count > self.ctx.max_idle_count {
+                                println!("++++++     ???????????????????????????? {addr} ***StreamId({x_id}) Triggered wait for response idle timeout!");
                                 return Err(H2StreamTransferError::Idle(idle_interval.period(), idle_count));
                             }
                         } else {
+                            println!("      >>>NOT_IDLE ^^^^^ {addr} ***StreamId({x_id}) --> idle_count: {idle_count} task_id: {:?}", self.ctx.server_task_id());
                             idle_count = 0;
-
                             rsp_body_transfer.reset_active();
                         }
 

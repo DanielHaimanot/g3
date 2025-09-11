@@ -2,7 +2,6 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2023-2025 ByteDance and/or its affiliates.
  */
-
 use std::sync::Arc;
 
 use log::trace;
@@ -87,6 +86,7 @@ where
                     Err(_) => {
                         // timeout
                         self.stream_reader = Some(reader);
+                        println!("----> NEVER QUITE on TIMEOUT");
                         if quit_after_timeout {
                             // TODO may be attack
                             break;
@@ -123,7 +123,9 @@ where
                             req.inner.disable_keep_alive();
                         }
 
+                        println!("||----> {:?} write new request (TCP_CONNECT) onto the task queue! pipeline_stats",self.ctx.cc_info.client_addr());
                         if self.task_queue.send(Ok(req)).await.is_err() {
+                            println!("failed to write end has closed !!!!");
                             trace!(
                                 "write end has closed for previous request while sending new request"
                             );
@@ -147,9 +149,11 @@ where
                         }
                         trace!("Error handling client {}: {e:?}", self.ctx.client_addr());
                         // TODO handle error, negotiation failed, may be attack
+                        println!("$$$$$ ERROR in STREAM READER");
                         break;
                     }
                     Err(_) => {
+                        println!("$$$$$$ UNKOWN ERROR in STREAM READER");
                         trace!("timeout to read in a complete request header");
                         // TODO handle timeout, may be attack
                         break;
@@ -158,6 +162,7 @@ where
             } else {
                 match stream_receiver.recv().await.flatten() {
                     Some(mut reader) => {
+                        println!("----> write new request (TCP_CONNECT) -- NEXT: {:?}",self.ctx.cc_info.client_addr());
                         // we can now read the next request
                         reader.reset_buffer_stats(Arc::new(NilLimitedReaderStats::default()));
                         let limit_config = &self.ctx.server_config.tcp_sock_speed_limit;
@@ -167,10 +172,12 @@ where
                     }
                     None => {
                         // write end closed normally, task done
+                        println!("----> write new request (TCP_CONNECT) -- CLOSED: {:?}",self.ctx.cc_info.client_addr());
                         break;
                     }
                 }
             }
         }
+        println!("---------> READER DONE DONE");
     }
 }

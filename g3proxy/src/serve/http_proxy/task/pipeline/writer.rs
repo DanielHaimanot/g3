@@ -185,10 +185,12 @@ where
                 Some(Ok(req)) => {
                     let res = match self.do_auth(&req) {
                         Ok(user_ctx) => {
+                            println!("--> user_ctx");
                             self.req_count.consequent_auth_failed = 0;
                             self.run(req, user_ctx).await
                         }
                         Err(e) => {
+                            println!("--> untrusted user");
                             self.req_count.consequent_auth_failed += 1;
                             self.req_count.auth_failed += 1;
                             self.run_untrusted(req, e.blocked_delay()).await
@@ -198,6 +200,7 @@ where
                     res
                 }
                 Some(Err(rsp)) => {
+                    println!("-----> Task writer: make an error response!");
                     // the response will always be `Connection: Close`
                     self.req_count.invalid += 1;
                     if !self.ctx.server_config.no_early_error_reply
@@ -240,6 +243,7 @@ where
         mut req: HttpProxyRequest<CDR>,
         user_ctx: Option<UserContext>,
     ) -> LoopAction {
+        println!("-----> running writer.rs trusted with protocol: {:?}", req.client_protocol);
         let path_selection = self.get_egress_path_selection(&mut req.inner.end_to_end_headers);
         let task_notes = ServerTaskNotes::with_path_selection(
             self.ctx.cc_info.clone(),
@@ -291,6 +295,7 @@ where
                         HttpProxyConnectTask::new(&self.ctx, audit_ctx, &req, task_notes);
                     connect_task.connect_to_upstream(&mut stream_w).await;
                     if connect_task.back_to_http() {
+                        println!("----> connect task back to http!");
                         // reopen write end
                         self.stream_writer = Some(stream_w);
                         // reopen read end
@@ -301,9 +306,11 @@ where
                             LoopAction::Continue
                         }
                     } else {
+                        println!("---> dont connect task back to http! CLIENT: {:?}", self.ctx.cc_info.client_addr());
                         // close read end
                         let _ = req.stream_sender.try_send(None);
-                        connect_task.into_running(stream_r.into_inner(), stream_w);
+                        connect_task.into_running(stream_r.into_inner(), stream_w); // @@@ run this handoff to application layer
+                        println!("---> done writer for connect task_into_running !!! CLIENT: {:?}", self.ctx.cc_info.client_addr());
                         LoopAction::Break
                     }
                 } else {
@@ -359,6 +366,7 @@ where
         mut req: HttpProxyRequest<CDR>,
         blocked_delay: Option<Duration>,
     ) -> LoopAction {
+        println!("----> running untrusted!");
         if self.ctx.server_config.no_early_error_reply {
             if let Some(duration) = blocked_delay {
                 self.ctx.server_stats.forbidden.add_user_blocked();

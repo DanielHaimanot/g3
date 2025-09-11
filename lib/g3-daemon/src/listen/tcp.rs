@@ -196,7 +196,7 @@ where
                                 Err(())
                             }
                             Err(e) => {
-                                self.listen_stats.add_failed();
+                                self.listen_stats.add_failed(); // @@@ very important stat add
                                 warn!("SRT[{}_v{}#{}] accept: {e:?}",
                                     self.server.name(), self.server_version, self.instance_id);
                                 Ok(())

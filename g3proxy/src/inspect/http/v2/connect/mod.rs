@@ -124,6 +124,7 @@ impl<'a, SC: ServerConfig> ExchangeHead<'a, SC> {
                         self.http_notes.rsp_status = rsp_status;
                     }
                 }
+                println!("===> +++++ final run error for h2 {e}");
                 Err(e)
             }
         }
@@ -313,8 +314,14 @@ impl<'a, SC: ServerConfig> ExchangeHead<'a, SC> {
                 self.send_response(ups_rsp, ups_w, clt_r, clt_send_rsp)
                     .await
             }
-            Ok(Err(e)) => Err(H2StreamTransferError::ResponseHeadRecvFailed(e)),
-            Err(_) => Err(H2StreamTransferError::ResponseHeadRecvTimeout),
+            Ok(Err(e)) => {
+                println!("@@@@ We hit the send request ERROR {:?}", e);
+                Err(H2StreamTransferError::ResponseHeadRecvFailed(e))
+            },
+            Err(e) => {
+                println!(" ***** hit a response timeout {:?}", e);
+                Err(H2StreamTransferError::ResponseHeadRecvTimeout)
+            },
         }
     }
 

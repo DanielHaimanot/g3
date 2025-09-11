@@ -56,7 +56,7 @@ impl H2InterceptionError {
 
     pub(super) fn client_handshake_failed(e: h2::Error) -> Self {
         if e.is_io() {
-            H2InterceptionError::ClientHandshakeIoError(e.into_io().unwrap())
+            H2InterceptionError::ClientHandshakeIoError(e.into_io().unwrap()) // @@@ failed to read preface error right here!
         } else {
             H2InterceptionError::UnexpectedError(anyhow!(
                 "unhandled error while handshake to client: {e:?}"
@@ -115,7 +115,10 @@ impl H2StreamTransferError {
             }
             H2StreamTransferError::RequestHeadSendFailed(_) => StatusCode::BAD_GATEWAY,
             H2StreamTransferError::InvalidHostHeader => StatusCode::BAD_REQUEST,
-            H2StreamTransferError::ResponseHeadRecvFailed(_) => StatusCode::BAD_GATEWAY,
+            H2StreamTransferError::ResponseHeadRecvFailed(e) => {
+                println!(" $$$$$$ We triggered bad gateway for error {:?}", e);
+                StatusCode::BAD_GATEWAY
+            },
             H2StreamTransferError::ResponseHeadRecvTimeout => StatusCode::GATEWAY_TIMEOUT,
             _ => return None,
         };

@@ -4,7 +4,7 @@
  */
 
 use std::future::poll_fn;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use std::time::Duration;
 
 use async_recursion::async_recursion;
@@ -164,7 +164,10 @@ where
             ProtocolInspectAction::Intercept => self
                 .do_intercept()
                 .await
-                .map_err(|e| InterceptionError::H2(e).into_server_task_error(Protocol::Http2)),
+                .map_err(|e| {
+                     //   println!("|| ---> ++++h2 detected interception_error {:?}", e);
+                    InterceptionError::H2(e).into_server_task_error(Protocol::Http2)
+                }),
             #[cfg(feature = "quic")]
             ProtocolInspectAction::Detour => self.do_detour().await,
             ProtocolInspectAction::Bypass => self.do_bypass().await,
@@ -175,11 +178,13 @@ where
         };
         match r {
             Ok(_) => {
+                println!("--> $$$ Done intercept ---> {:?}", self.ctx.server_task_id());
                 intercept_log!(self, "finished");
                 Ok(())
             }
             Err(e) => {
-                intercept_log!(self, "{e}");
+                println!("--> @@@@ DETECTED H2 intercept ERROR! {:?}", e);
+                intercept_log!(self, "{e}"); // @@@ add more stats here for layer 7 metrics
                 Err(e)
             }
         }
@@ -336,9 +341,14 @@ where
             ups_r,
             ups_w,
         } = self.io.take().unwrap();
+        let addr = self.ctx.task_notes.client_addr.clone();
+
+        println!("||----> {addr} reached the H2 interception logic for the TCPstream!");
 
         let http_config = self.ctx.h2_interception();
+
         let mut client_builder = h2::client::Builder::new();
+
         client_builder
             .enable_push(false) // server push is deprecated by chrome and nginx
             .max_header_list_size(http_config.max_header_list_size)
@@ -348,6 +358,7 @@ where
             .initial_window_size(http_config.stream_window_size())
             .initial_connection_window_size(http_config.connection_window_size());
 
+        // set the connection with the downstream server
         let (h2s, mut h2s_connection) = match tokio::time::timeout(
             http_config.upstream_handshake_timeout,
             client_builder.handshake(tokio::io::join(ups_r, ups_w)),
@@ -355,11 +366,18 @@ where
         .await
         {
             Ok(Ok(d)) => d,
-            Ok(Err(e)) => return Err(H2InterceptionError::upstream_handshake_failed(e)),
-            Err(_) => return Err(H2InterceptionError::UpstreamHandshakeTimeout),
+            Ok(Err(e)) =>{
+                println!("||=====> +++ {e} HANDSHAKE H2 client:{addr}");
+                return Err(H2InterceptionError::upstream_handshake_failed(e))
+            } ,
+            Err(e) => {
+                println!("||=====> +++ {e} HANDSHAKE client:{addr}");
+                return Err(H2InterceptionError::UpstreamHandshakeTimeout)
+            },
         };
 
         let (ping_quit_sender, ping_quit_receiver) = oneshot::channel();
+
         if let Some(ping) = h2s_connection.ping_pong() {
             let ping_task =
                 H2PingTask::new(self.ctx.clone(), self.stats.clone(), self.upstream.clone());
@@ -369,13 +387,20 @@ where
             u32::try_from(h2s_connection.max_concurrent_send_streams())
                 .unwrap_or(u32::MAX)
                 .min(http_config.max_concurrent_streams);
+
         let (ups_close_sender, mut ups_close_receiver) = oneshot::channel();
+
         tokio::spawn(async move {
+            // connection with remote server is closed
             if let Err(e) = h2s_connection.await {
+                println!("||----> {addr} @@@@@@@ dropped connection sender channels {e}");
                 let _ = ups_close_sender.send(e);
+            }else {
+                println!("||----> {addr} @@@@@@@ TCP connection closed ??");
             }
         });
 
+        // handle the connections with the upstream client
         let mut server_builder = h2::server::Builder::new();
         server_builder
             .max_header_list_size(http_config.max_header_list_size)
@@ -401,16 +426,19 @@ where
 
         let mut idle_interval = self.ctx.idle_wheel.register();
         let mut idle_count = 0;
-        let mut is_active = false;
+
+        let open_tasks = Arc::new(AtomicUsize::new(0));
 
         loop {
             tokio::select! {
                 biased;
 
                 ups_r = &mut ups_close_receiver => {
+                    println!("|| ----> {:?} @@@@ close the proxy to remote connection", self.ctx.task_notes.client_addr.clone());
                     let _ = ping_quit_sender.send(());
                     return match ups_r {
                         Ok(e) => {
+                            println!("|| ----> {:?} @@@@ upstream connection error {:?}", self.ctx.task_notes.client_addr.clone(), e);
                             // upstream connection error
                             server_graceful_shutdown(h2c_connection).await;
                             if let Some(e) = e.get_io()
@@ -419,8 +447,9 @@ where
                                 }
                             Err(H2InterceptionError::UpstreamConnectionClosed(e))
                         }
-                        Err(_) => {
-                            // upstream connection closed
+                        Err(e) => {
+                            println!("|| ----> {:?} @@@ upstream connection closed clean (expected) {:?}", self.ctx.task_notes.client_addr.clone(), e);
+                            // upstream connection clean closed
                             self.log_upstream_shutdown();
                             server_graceful_shutdown(h2c_connection).await;
                             Ok(())
@@ -430,62 +459,78 @@ where
                 clt_r = h2c_connection.accept() => {
                     match clt_r {
                         Some(Ok((clt_req, clt_send_rsp))) => {
-                            is_active = true;
                             let h2s = h2s.clone();
                             let ctx = self.ctx.clone();
                             let stats = self.stats.clone();
+                            let transfer_tasks = open_tasks.clone();
+
                             stats.add_task();
+                            open_tasks.fetch_add(1, Ordering::SeqCst);
+
+                            let addr = self.ctx.task_notes.client_addr.clone();
+                            let task_id =  self.ctx.server_task_id().clone();
+
                             tokio::spawn(async move {
+                                let x_id = clt_req.body().stream_id();
+                                println!("|| ---> {addr} NEW STREAM:{:?} --> alive_tasks:{:?} --> task_id:{:?}", x_id, stats.get_alive_task(), task_id);
                                 stream::transfer(clt_req, clt_send_rsp, h2s, ctx).await;
+                                println!("|| ---> {addr} closed stream id: {:?}", x_id);
+                                transfer_tasks.fetch_sub(1, Ordering::SeqCst);
                                 stats.del_task();
                             });
                             continue;
                         }
                         Some(Err(e)) => {
+                            println!("|| ----> {:?} ++++ we hit an unexpected shutdown!! --- {e}", self.ctx.task_notes.client_addr.clone());
                             // close all stream and let the h2s connection to close
                             drop(h2s);
                             let _ = ping_quit_sender.send(());
                             // h2c_connection.poll_closed() has already been called in accept()
-
                             if let Some(e) = e.get_io()
                                 && e.kind() == std::io::ErrorKind::NotConnected {
+                                     println!("         || ----> {:?} ++++ fyi ErrorKind::NotConnected --- {e}", self.ctx.task_notes.client_addr.clone());
                                     return Ok(());
                                 }
                             return Err(H2InterceptionError::ClientConnectionClosed(e));
                         }
                         None => {
+                            println!("|| ----> {:?} @@@@@@ HIT CLIENT SHUTDOWN @@@@@@ --> socket has been closed (clean)", self.ctx.task_notes.client_addr.clone());
+
                             // close all stream and let the h2s connection to close
                             drop(h2s);
                             let _ = ping_quit_sender.send(());
                             self.log_client_shutdown();
                             let _ = poll_fn(|cx| h2c_connection.poll_closed(cx)).await;
+
                             return Ok(());
                         }
                     }
                 }
                 n = idle_interval.tick() => {
-                    if !is_active && self.stats.get_alive_task() <= 0 {
+                    // can't use relaxed ordering here because
+                    println!("|| ----> {:?} ^^^^^ {:?} --> tick for idle_count: {:?} - alive_tasks: {:?}", self.ctx.task_notes.client_addr.clone(), self.ctx.server_task_id(), idle_count, self.stats.get_alive_task());
+                    if open_tasks.load(Ordering::SeqCst) == 0 {
                         idle_count += n;
-
                         if idle_count > self.ctx.max_idle_count {
                             let _ = ping_quit_sender.send(());
-                            server_abrupt_shutdown(h2c_connection, Reason::ENHANCE_YOUR_CALM).await;
-
+                            println!("@@@@@ ---> {:?} Aggressive close INTERVAL EXPIRED", self.ctx.task_notes.client_addr.clone());
+                            server_abrupt_shutdown(h2c_connection, Reason::NO_ERROR).await;
                             return Err(H2InterceptionError::Idle(idle_interval.period(), idle_count));
                         }
                     } else {
                         idle_count = 0;
-                        is_active = false;
                     }
 
                     if self.ctx.belongs_to_blocked_user() {
                         let _ = ping_quit_sender.send(());
                         server_abrupt_shutdown(h2c_connection, Reason::ENHANCE_YOUR_CALM).await;
+                        // server_graceful_shutdown(h2c_connection).await;
 
                         return Err(H2InterceptionError::CanceledAsUserBlocked);
                     }
 
                     if self.ctx.server_force_quit() {
+                        println!("#### We hit server force quit");
                         let _ = ping_quit_sender.send(());
                         server_graceful_shutdown(h2c_connection).await;
 
@@ -493,6 +538,7 @@ where
                     }
 
                     if self.ctx.server_offline() {
+                        println!("#### We hit server force offline");
                         h2c_connection.graceful_shutdown();
                     }
                 }
@@ -524,11 +570,17 @@ where
     while let Some(r) = h2c.accept().await {
         match r {
             Ok((_req, mut send_rsp)) => {
+                println!("---> @@@refused new stream");
                 send_rsp.send_reset(Reason::REFUSED_STREAM);
             }
-            Err(_) => return,
+            Err(e) => {
+                println!("---> @@@ some error was returned {:?}", e);
+                return
+            },
         }
     }
 
+    println!("---> @@@ DONE no new connections");
     let _ = poll_fn(|cx| h2c.poll_closed(cx)).await;
+    println!("---> @@@@ DRAINED all remaining!");
 }

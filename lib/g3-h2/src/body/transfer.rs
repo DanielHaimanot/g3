@@ -20,6 +20,7 @@ pub struct H2BodyTransfer {
     active: bool,
 }
 
+// @@@ logic to handle continued body transfer from remote to client
 impl H2BodyTransfer {
     pub fn new(recv_stream: RecvStream, send_stream: SendStream<Bytes>, yield_size: usize) -> Self {
         H2BodyTransfer {
@@ -75,11 +76,12 @@ impl H2BodyTransfer {
         }
 
         let mut copy_this_round = 0usize;
-
+        println!(" %%%%% poll transfer running something? ");
         loop {
             if let Some(mut chunk) = self.send_chunk.take() {
                 match self.send_stream.poll_capacity(cx) {
                     Poll::Ready(Some(Ok(n))) => {
+                        println!(" %%%% transfer send_stream ready");
                         self.active = true;
                         let to_send = chunk.split_to(n);
                         self.send_stream
@@ -96,16 +98,19 @@ impl H2BodyTransfer {
                         }
                     }
                     Poll::Ready(Some(Err(e))) => {
+                        println!(" %%%% transfer send_stream ready with error");
                         self.send_chunk = Some(chunk);
                         return Poll::Ready(Err(
                             H2StreamBodyTransferError::WaitSendCapacityFailed(e),
                         ));
                     }
                     Poll::Ready(None) => {
+                        println!(" %%%% transfer send_stream ready but chunk is None?");
                         self.send_chunk = Some(chunk);
                         return Poll::Ready(Err(H2StreamBodyTransferError::SenderNotInSendState));
                     }
                     Poll::Pending => {
+                        println!(" %%%% transfer send_stream pending boy!");
                         self.send_chunk = Some(chunk);
                         return Poll::Pending;
                     }
@@ -113,6 +118,7 @@ impl H2BodyTransfer {
             } else {
                 match ready!(self.recv_stream.poll_data(cx)) {
                     Some(Ok(chunk)) => {
+                        println!(" %%%% transfer receive stream ready and chunk");
                         self.active = true;
                         if chunk.is_empty() {
                             continue;
@@ -126,15 +132,19 @@ impl H2BodyTransfer {
                         self.send_chunk = Some(chunk);
                     }
                     Some(Err(e)) => {
+                        println!(" %%%% transfer receive stream READY with error failed to receive {e} --->");
                         return Poll::Ready(Err(H2StreamBodyTransferError::RecvDataFailed(e)));
                     }
                     None => {
                         return if self.recv_stream.is_end_stream() {
+                            println!(" %%%% transfer receive stream READY (close?) --->");
                             self.send_stream
                                 .send_data(Bytes::new(), true)
                                 .map_err(H2StreamBodyTransferError::GracefulCloseError)?;
+                            println!(" %%%%                 OK transfer receive stream READY (closed!) --->");
                             Poll::Ready(Ok(()))
                         } else {
+                            println!(" %%%% transfer receive stream READY (handle trailers!) --->");
                             self.handle_trailers = true;
                             self.poll_transfer_trailers(cx)
                         };

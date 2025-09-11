@@ -22,6 +22,7 @@ const CERT_USAGE: TlsCertUsage = TlsCertUsage::TlsServer;
 #[cfg(feature = "vendored-tongsuo")]
 const CERT_USAGE: TlsCertUsage = TlsCertUsage::TLsServerTongsuo;
 
+// @@@@ here is where we intercept all the TLS information
 impl<SC> TlsInterceptObject<SC>
 where
     SC: ServerConfig + Send + Sync + 'static,
@@ -47,9 +48,11 @@ where
             })?;
 
         let sni_hostname = client_hello.sni.as_ref();
+        println!("---> into TLS");
         // build to server ssl context based on client hello
         if let Some(domain) = sni_hostname {
             // TODO also fetch user-site config here?
+            // @@@ enable mTLS for user site configuration here?
             self.upstream.set_host(Host::from(domain));
         }
         let alpn_ext = client_hello.alpn.as_ref().map(|ext| {
@@ -144,9 +147,10 @@ where
             .map_err(TlsInterceptionError::InternalOpensslServerError)?;
         // set alpn
         if let Some(alpn_protocol) = ups_tls_stream.ssl().selected_alpn_protocol() {
+            println!("---> using protocol::<{:?}>", alpn_protocol.to_vec());
             self.tls_interception
                 .server_config
-                .set_selected_alpn(&mut clt_ssl, alpn_protocol.to_vec());
+                .set_selected_alpn(&mut clt_ssl, alpn_protocol.to_vec()); // @@@ here we set the h2 as only option for the cert pair to clt
         }
 
         let clt_acceptor = SslAcceptor::new(
@@ -160,6 +164,7 @@ where
             ))
         })?;
         let clt_tls_stream = clt_acceptor.accept().await.map_err(|e| {
+            println!("@@@@ client handshake did fail !!");
             TlsInterceptionError::ClientHandshakeFailed(anyhow!("client handshake error: {e:?}"))
         })?;
 
@@ -173,7 +178,7 @@ where
         } else {
             false
         };
-
+        println!("-----> using protocol fyi: {:?}", protocol);
         Ok(self.transfer_connected(protocol, has_alpn, clt_tls_stream, ups_tls_stream))
     }
 }

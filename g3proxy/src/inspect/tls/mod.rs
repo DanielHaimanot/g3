@@ -422,6 +422,7 @@ where
                 self.inspect_inner(protocol, has_alpn, clt_r, clt_w, ups_r, ups_w)
             }
         } else {
+            println!("--> run inner insepction!");
             self.inspect_inner(protocol, has_alpn, clt_r, clt_w, ups_r, ups_w)
         }
     }
@@ -455,7 +456,7 @@ where
                 );
                 StreamInspection::H1(h1_obj)
             }
-            Protocol::Http2 => {
+            Protocol::Http2 => { // @@@ here we set the http2 logic for stream inspection!
                 let mut h2_obj =
                     crate::inspect::http::H2InterceptObject::new(ctx, self.upstream.clone());
                 h2_obj.set_io(

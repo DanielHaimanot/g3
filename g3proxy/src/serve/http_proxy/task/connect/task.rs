@@ -321,6 +321,7 @@ impl HttpProxyConnectTask {
             .await
         {
             Ok(connection) => {
+                println!("----> TCP Connected to downstream Server");
                 self.task_notes.stage = ServerTaskStage::Connected;
                 self.stream_ups = Some(connection);
                 Ok(())
@@ -399,8 +400,14 @@ impl HttpProxyConnectTask {
             match self.stream_ups.take() {
                 Some((ups_r, ups_w)) => {
                     let e = match self.run_connected(clt_r, clt_w, ups_r, ups_w).await {
-                        Ok(_) => ServerTaskError::Finished,
-                        Err(e) => e,
+                        Ok(_) => {
+                            // @@@ run this task as the handover
+                            ServerTaskError::Finished
+                        },
+                        Err(e) => {
+                            println!("      ++++ TCP into running {e}");
+                            e
+                        },
                     };
                     if let Some(log_ctx) = self.get_log_context() {
                         log_ctx.log(e);
@@ -411,7 +418,7 @@ impl HttpProxyConnectTask {
         });
     }
 
-    async fn run_connected<CDR, CDW, UR, UW>(
+    async fn run_connected<CDR, CDW, UR, UW>( // @@@ run connected stream
         &mut self,
         clt_r: CDR,
         mut clt_w: HttpClientWriter<CDW>,
@@ -456,6 +463,7 @@ impl HttpProxyConnectTask {
         UR: AsyncRead + Send + Sync + Unpin + 'static,
         UW: AsyncWrite + Send + Sync + Unpin + 'static,
     {
+        println!("---> TCP established: moving into relay phase : {:?}", self.ctx.cc_info.client_addr());
         let (clt_r, clt_w) = self.update_clt(clt_r, clt_w);
 
         if let Some(audit_handle) = self.audit_ctx.handle() {
@@ -471,7 +479,7 @@ impl HttpProxyConnectTask {
                 })
                 .unwrap_or_else(|| audit_handle.do_task_audit());
 
-            if audit_task {
+            if audit_task {  // @@@ here we transit if for % audit task
                 let ctx = StreamInspectContext::new(
                     audit_handle.clone(),
                     self.ctx.server_config.clone(),

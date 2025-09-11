@@ -237,6 +237,7 @@ impl HttpProxyServer {
         let ctx = self.get_common_task_context(cc_info);
         let pipeline_stats = Arc::new(HttpProxyPipelineStats::default());
         let (task_sender, task_receiver) = mpsc::channel(ctx.server_config.pipeline_size.get());
+        println!("-----> pipeline size per TCP stream  :: {:?} ~~~ {:?}", ctx.server_config.pipeline_size.get(), ctx.cc_info.client_addr());
 
         // NOTE tls underlying traffic is not counted in (server/task/user) stats
 
@@ -250,9 +251,10 @@ impl HttpProxyServer {
             clt_w,
             &pipeline_stats,
         );
-
+        // @@@ root of the proxy server task
         tokio::spawn(r_task.into_running());
-        w_task.into_running().await
+        w_task.into_running().await;
+        println!("--> are we done done for client writer {:?}", ctx.cc_info.client_addr())
     }
 
     #[cfg(feature = "quic")]
@@ -374,11 +376,12 @@ impl BaseServer for HttpProxyServer {
 impl AcceptTcpServer for HttpProxyServer {
     async fn run_tcp_task(&self, stream: TcpStream, cc_info: ClientConnectionInfo) {
         let client_addr = cc_info.client_addr();
+        println!("=======================>>>> NEW TCP TASK for client {:?}", client_addr);
         self.server_stats.add_conn(client_addr);
         if self.drop_early(client_addr) {
             return;
         }
-
+        // @@@@ here is where all the task handling starts for us
         if let Some(tls_acceptor) = &self.tls_acceptor {
             match tokio::time::timeout(self.tls_accept_timeout, tls_acceptor.accept(stream)).await {
                 Ok(Ok(tls_stream)) => {
@@ -386,21 +389,22 @@ impl AcceptTcpServer for HttpProxyServer {
                         // Quick ACK is needed with session resumption
                         cc_info.tcp_sock_try_quick_ack();
                     }
-                    self.spawn_stream_task(tls_stream, cc_info).await
+                    println!("  ------> RESUME TLS SESSION::");
+                    self.spawn_stream_task(tls_stream, cc_info).await // @@@ check out session resumption logic
                 }
                 Ok(Err(e)) => {
                     self.listen_stats.add_failed();
-                    debug!(
-                        "{} - {} tls error: {e:?}",
+                    println!(
+                        "   +++++++ {} - {} tls error: {e:?}",
                         cc_info.sock_local_addr(),
                         cc_info.sock_peer_addr()
                     );
                     // TODO record tls failure and add some sec policy
                 }
-                Err(_) => {
+                Err(e) => {
                     self.listen_stats.add_timeout();
-                    debug!(
-                        "{} - {} tls timeout",
+                    println!(
+                        "   +++++++ {} - {} tls timeout -- {e}",
                         cc_info.sock_local_addr(),
                         cc_info.sock_peer_addr()
                     );
@@ -408,6 +412,7 @@ impl AcceptTcpServer for HttpProxyServer {
                 }
             }
         } else {
+            println!("  ------> NEW TLS SESSION::");
             self.spawn_stream_task(stream, cc_info).await;
         }
     }
