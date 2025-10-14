@@ -18,6 +18,7 @@ pub(crate) use metrics::user_site;
 
 static QUIT_STAT_THREAD: AtomicBool = AtomicBool::new(false);
 
+// add prometheus client 
 fn build_statsd_client(config: &StatsdClientConfig) -> anyhow::Result<StatsdClient> {
     let client = config
         .build()
